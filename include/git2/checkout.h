@@ -191,9 +191,9 @@ typedef enum {
 typedef int (*git_checkout_notify_cb)(
 	git_checkout_notify_t why,
 	const char *path,
-	const git_diff_file *baseline,
-	const git_diff_file *target,
-	const git_diff_file *workdir,
+	const git_delta_file *baseline,
+	const git_delta_file *target,
+	const git_delta_file *workdir,
 	void *payload);
 
 /** Checkout progress notification function */

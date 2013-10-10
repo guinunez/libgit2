@@ -187,7 +187,7 @@ GIT_EXTERN(int) git_pathspec_match_tree(
  */
 GIT_EXTERN(int) git_pathspec_match_diff(
 	git_pathspec_match_list **out,
-	git_diff_list *diff,
+	git_diff *diff,
 	uint32_t flags,
 	git_pathspec *ps);
 
@@ -230,7 +230,7 @@ GIT_EXTERN(const char *) git_pathspec_match_list_entry(
  * @param pos The index into the list
  * @return The filename of the match
  */
-GIT_EXTERN(const git_diff_delta *) git_pathspec_match_list_diff_entry(
+GIT_EXTERN(const git_delta *) git_pathspec_match_list_diff_entry(
 	const git_pathspec_match_list *m, size_t pos);
 
 /**

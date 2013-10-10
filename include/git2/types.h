@@ -174,6 +174,27 @@ typedef struct git_reference_iterator  git_reference_iterator;
 /** Merge heads, the input to merge */
 typedef struct git_merge_head git_merge_head;
 
+/** The diff object that contains all individual file deltas */
+typedef struct git_diff git_diff;
+
+/** Options that control how a diff is generated */
+typedef struct git_diff_options git_diff_options;
+
+/** Options that control how a diff delta is formatted */
+typedef struct git_diff_format_options git_diff_format_options;
+
+/** One side of a diff delta entry */
+typedef struct git_delta_file git_delta_file;
+
+/** Description of changes to a file in a diff */
+typedef struct git_delta git_delta;
+
+/** Patch is used to store all the text diffs for a delta */
+typedef struct git_patch git_patch;
+
+/** Options that control how a patch is generated */
+typedef struct git_patch_options git_patch_options;
+
 /** Representation of a status collection */
 typedef struct git_status_list git_status_list;
 

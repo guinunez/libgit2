@@ -12,6 +12,7 @@
 #include "oid.h"
 #include "tree.h"
 #include "refs.h"
+#include "patch.h"
 
 /**
  * @file git2/diff.h
@@ -20,34 +21,38 @@
  * Overview
  * --------
  *
- * Calculating diffs is generally done in two phases: building a diff list
- * then traversing the diff list.  This makes is easier to share logic
- * across the various types of diffs (tree vs tree, workdir vs index, etc.),
- * and also allows you to insert optional diff list post-processing phases,
- * such as rename detected, in between the steps.  When you are done with a
- * diff list object, it must be freed.
+ * Calculating diffs is generally done in two phases: building a list of
+ * diffs then traversing it.  This makes is easier to share logic across
+ * the various types of diffs (tree vs tree, workdir vs index, etc.), and
+ * also allows you to insert optional diff list post-processing phases,
+ * such as rename detection, in between the steps.  When you are done with
+ * a diff object, it must be freed.
  *
  * Terminology
  * -----------
  *
  * To understand the diff APIs, you should know the following terms:
  *
- * - A `diff` or `diff list` represents the cumulative list of differences
- *   between two snapshots of a repository (possibly filtered by a set of
- *   file name patterns).  This is the `git_diff_list` object.
+ * - A `diff` represents the cumulative list of differences between two
+ *   snapshots of a repository (possibly filtered by a set of file name
+ *   patterns).  This is the `git_diff` object.
+ *
  * - A `delta` is a file pair with an old and new revision.  The old version
  *   may be absent if the file was just created and the new version may be
  *   absent if the file was deleted.  A diff is mostly just a list of deltas.
+ *
  * - A `binary` file / delta is a file (or pair) for which no text diffs
- *   should be generated.  A diff list can contain delta entries that are
+ *   should be generated.  A diff can contain delta entries that are
  *   binary, but no diff content will be output for those files.  There is
  *   a base heuristic for binary detection and you can further tune the
  *   behavior with git attributes or diff flags and option settings.
+ *
  * - A `hunk` is a span of modified lines in a delta along with some stable
  *   surrounding context.  You can configure the amount of context and other
  *   properties of how hunks are generated.  Each hunk also comes with a
  *   header that described where it starts and ends in both the old and new
  *   versions in the delta.
+ *
  * - A `line` is a range of characters inside a hunk.  It could be a context
  *   line (i.e. in both old and new versions), an added line (i.e. only in
  *   the new version), or a removed line (i.e. only in the old version).
@@ -62,82 +67,69 @@
 GIT_BEGIN_DECL
 
 /**
- * Flags for diff options.  A combination of these flags can be passed
- * in via the `flags` value in the `git_diff_options`.
+ * Flags dictating what should be in the diff and in what order
  */
 typedef enum {
 	/** Normal diff, the default */
 	GIT_DIFF_NORMAL = 0,
+
 	/** Reverse the sides of the diff */
-	GIT_DIFF_REVERSE = (1 << 0),
-	/** Treat all files as text, disabling binary attributes & detection */
-	GIT_DIFF_FORCE_TEXT = (1 << 1),
-	/** Ignore all whitespace */
-	GIT_DIFF_IGNORE_WHITESPACE = (1 << 2),
-	/** Ignore changes in amount of whitespace */
-	GIT_DIFF_IGNORE_WHITESPACE_CHANGE = (1 << 3),
-	/** Ignore whitespace at end of line */
-	GIT_DIFF_IGNORE_WHITESPACE_EOL = (1 << 4),
-	/** Treat all submodules as unmodified */
-	GIT_DIFF_IGNORE_SUBMODULES = (1 << 5),
-	/** Use the "patience diff" algorithm (currently unimplemented) */
-	GIT_DIFF_PATIENCE = (1 << 6),
-	/** Include ignored files in the diff list */
-	GIT_DIFF_INCLUDE_IGNORED = (1 << 7),
-	/** Include untracked files in the diff list */
-	GIT_DIFF_INCLUDE_UNTRACKED = (1 << 8),
-	/** Include unmodified files in the diff list */
-	GIT_DIFF_INCLUDE_UNMODIFIED = (1 << 9),
+	GIT_DIFF_REVERSE = (1u << 0),
+
+	/** Force case insensitive filename comparisons */
+	GIT_DIFF_DELTAS_ARE_ICASE = (1u << 1),
+
+	/** Include ignored files in the diff */
+	GIT_DIFF_INCLUDE_IGNORED = (1u << 2),
+
+	/** Even with GIT_DIFF_INCLUDE_IGNORED, an entire ignored directory
+	 *  will produce only a single entry in the diff list; this flag adds
+	 *  all files under the directory as IGNORED entries, too.
+	 */
+	GIT_DIFF_RECURSE_IGNORED_DIRS = (1u << 3),
+
+	/** Include untracked files in the diff */
+	GIT_DIFF_INCLUDE_UNTRACKED = (1u << 4),
 
 	/** Even with GIT_DIFF_INCLUDE_UNTRACKED, an entire untracked
-	 *  directory will be marked with only a single entry in the diff list
-	 *  (a la what core Git does in `git status`); this flag adds *all*
-	 *  files under untracked directories as UNTRACKED entries, too.
+	 *  directory will produce only a single entry in the diff list (a la
+	 *  what core Git does in `git status`); this flag adds *all* files
+	 *  under untracked directories as UNTRACKED entries, too.
 	 */
-	GIT_DIFF_RECURSE_UNTRACKED_DIRS = (1 << 10),
+	GIT_DIFF_RECURSE_UNTRACKED_DIRS = (1u << 5),
 
-	/** If the pathspec is set in the diff options, this flags means to
-	 *  apply it as an exact match instead of as an fnmatch pattern.
-	 */
-	GIT_DIFF_DISABLE_PATHSPEC_MATCH = (1 << 11),
-
-	/** Use case insensitive filename comparisons */
-	GIT_DIFF_DELTAS_ARE_ICASE = (1 << 12),
-
-	/** When generating patch text, include the content of untracked
-	 *  files.  This automatically turns on GIT_DIFF_INCLUDE_UNTRACKED but
-	 *  it does not turn on GIT_DIFF_RECURSE_UNTRACKED_DIRS.  Add that
-	 *  flag if you want the content of every single UNTRACKED file.
-	 */
-	GIT_DIFF_INCLUDE_UNTRACKED_CONTENT = (1 << 13),
-
-	/** Disable updating of the `binary` flag in delta records.  This is
-	 *  useful when iterating over a diff if you don't need hunk and data
-	 *  callbacks and want to avoid having to load file completely.
-	 */
-	GIT_DIFF_SKIP_BINARY_CHECK = (1 << 14),
+	/** Include unmodified files in the diff */
+	GIT_DIFF_INCLUDE_UNMODIFIED = (1u << 6),
 
 	/** Normally, a type change between files will be converted into a
 	 *  DELETED record for the old and an ADDED record for the new; this
 	 *  options enabled the generation of TYPECHANGE delta records.
 	 */
-	GIT_DIFF_INCLUDE_TYPECHANGE = (1 << 15),
+	GIT_DIFF_INCLUDE_TYPECHANGE = (1u << 7),
 
-	/** Even with GIT_DIFF_INCLUDE_TYPECHANGE, blob->tree changes still
+	/** Even with GIT_DIFF_INCLUDE_TYPECHANGE, blob-to-tree changes still
 	 *  generally show as a DELETED blob.  This flag tries to correctly
 	 *  label blob->tree transitions as TYPECHANGE records with new_file's
 	 *  mode set to tree.  Note: the tree SHA will not be available.
 	 */
-	GIT_DIFF_INCLUDE_TYPECHANGE_TREES  = (1 << 16),
+	GIT_DIFF_INCLUDE_TYPECHANGE_TREES = (1u << 8),
 
 	/** Ignore file mode changes */
-	GIT_DIFF_IGNORE_FILEMODE = (1 << 17),
+	GIT_DIFF_IGNORE_FILEMODE = (1u << 9),
 
-	/** Even with GIT_DIFF_INCLUDE_IGNORED, an entire ignored directory
-	 *  will be marked with only a single entry in the diff list; this flag
-	 *  adds all files under the directory as IGNORED entries, too.
+	/** Treat all submodules as unmodified */
+	GIT_DIFF_IGNORE_SUBMODULES = (1u << 10),
+
+	/** If the pathspec is set in the diff options, this flags means to
+	 *  apply it as an exact match instead of as an fnmatch pattern.
 	 */
-	GIT_DIFF_RECURSE_IGNORED_DIRS = (1 << 18),
+	GIT_DIFF_DISABLE_PATHSPEC_MATCH = (1u << 11),
+
+	/** Disable updating of the `binary` flag in delta records.  This is
+	 *  useful when iterating over a diff if you don't need hunk and data
+	 *  callbacks and want to avoid having to load file completely.
+	 */
+	GIT_DIFF_SKIP_BINARY_CHECK = (1u << 12),
 
 	/** Core Git scans inside untracked directories, labeling them IGNORED
 	 *  if they are empty or only contain ignored files; a directory is
@@ -147,35 +139,8 @@ typedef enum {
 	 *  UNTRACKED without looking inside it (which differs from core Git).
 	 *  Of course, ignore rules are still checked for the directory itself.
 	 */
-	GIT_DIFF_FAST_UNTRACKED_DIRS = (1 << 19),
-
-	/** Treat all files as binary, disabling text diffs */
-	GIT_DIFF_FORCE_BINARY = (1 << 20),
+	GIT_DIFF_FAST_UNTRACKED_DIRS = (1u << 15),
 } git_diff_option_t;
-
-/**
- * The diff list object that contains all individual file deltas.
- *
- * This is an opaque structure which will be allocated by one of the diff
- * generator functions below (such as `git_diff_tree_to_tree`).  You are
- * responsible for releasing the object memory when done, using the
- * `git_diff_list_free()` function.
- */
-typedef struct git_diff_list git_diff_list;
-
-/**
- * Flags for the delta object and the file objects on each side.
- *
- * These flags are used for both the `flags` value of the `git_diff_delta`
- * and the flags for the `git_diff_file` objects representing the old and
- * new sides of the delta.  Values outside of this public range should be
- * considered reserved for internal or future use.
- */
-typedef enum {
-	GIT_DIFF_FLAG_BINARY     = (1 << 0), /** file(s) treated as binary data */
-	GIT_DIFF_FLAG_NOT_BINARY = (1 << 1), /** file(s) treated as text data */
-	GIT_DIFF_FLAG_VALID_OID  = (1 << 2), /** `oid` value is known correct */
-} git_diff_flag_t;
 
 /**
  * What type of change is described by a git_diff_delta?
@@ -200,6 +165,19 @@ typedef enum {
 } git_delta_t;
 
 /**
+ * Flags for the delta file objects on each side.
+ *
+ * These flags are used for the `flags` value of `git_delta_file` objects
+ * representing the old and new sides of the delta.  Values outside of
+ * this public range are reserved for internal or future use.
+ */
+typedef enum {
+	GIT_DIFF_FLAG_BINARY     = (1 << 0), /** file(s) treated as binary data */
+	GIT_DIFF_FLAG_NOT_BINARY = (1 << 1), /** file(s) treated as text data */
+	GIT_DIFF_FLAG_VALID_OID  = (1 << 2), /** `oid` value is known correct */
+} git_diff_flag_t;
+
+/**
  * Description of one side of a diff entry.
  *
  * Although this is called a "file", it may actually represent a file, a
@@ -220,13 +198,13 @@ typedef enum {
  * `mode` is, roughly, the stat() `st_mode` value for the item.  This will
  * be restricted to one of the `git_filemode_t` values.
  */
-typedef struct {
+struct git_delta_file {
 	git_oid     oid;
 	const char *path;
 	git_off_t   size;
 	uint32_t    flags;
 	uint16_t    mode;
-} git_diff_file;
+};
 
 /**
  * Description of changes to one entry.
@@ -235,22 +213,24 @@ typedef struct {
  * callback functions and you can use the contents to understand exactly
  * what has changed.
  *
- * The `old_file` represents the "from" side of the diff and the `new_file`
- * represents to "to" side of the diff.  What those means depend on the
- * function that was used to generate the diff and will be documented below.
- * You can also use the `GIT_DIFF_REVERSE` flag to flip it around.
+ * The `files` array represents the sides of the diff.  For added, deleted,
+ * unmodified, untracked, and ignored files, there will be only one entry.
+ * For modified, typechanged, renamed, or copied files, there will be two
+ * entries.  For conflicts, there may be multiple entries (currently this
+ * is unsupported).
  *
- * Although the two sides of the delta are named "old_file" and "new_file",
- * they actually may correspond to entries that represent a file, a symbolic
- * link, a submodule commit id, or even a tree (if you are tracking type
- * changes or ignored/untracked directories).
+ * When there are two entries in the `files` array, the first will usually
+ * be the "old" side of the diff and the second will be the "new" side.
+ * You can pass the `GIT_DIFF_REVERSE` flag to flip this around.
+ *
+ * Although the field is called `files`, the entries may actually
+ * correspond to a file, a symbolic link, a submodule commit id, or even a
+ * tree (if tracking type changes or ignored/untracked directories).
  *
  * Under some circumstances, in the name of efficiency, not all fields will
  * be filled in, but we generally try to fill in as much as possible.  One
- * example is that the "flags" field may not have either the `BINARY` or the
- * `NOT_BINARY` flag set to avoid examining file contents if you do not pass
- * in hunk and/or line callbacks to the diff foreach iteration function.  It
- * will just use the git attributes for those files.
+ * example is that the `binary` field may be zero (indicating unknown) if
+ * you have passed options to avoid reading the blob content.
  *
  * The similarity score is zero unless you call `git_diff_find_similar()`
  * which does a similarity analysis of files in the diff.  Use that
@@ -265,13 +245,15 @@ typedef struct {
  * below the split threshold.  To display this value like core Git, invert
  * the score (a la `printf("M%03d", 100 - delta->similarity)`).
  */
-typedef struct {
-	git_diff_file old_file;
-	git_diff_file new_file;
+struct git_delta {
 	git_delta_t   status;
-	uint32_t      similarity; /**< for RENAMED and COPIED, value 0-100 */
-	uint32_t      flags;
-} git_diff_delta;
+
+	uint16_t      nfiles;     /**< number of files in this delta */
+	uint16_t      similarity; /**< for RENAMED and COPIED, value 0-100 */
+	uint32_t      flags;      /**< git_diff_flag_t values */
+
+	git_delta_file files[GIT_FLEX_ARRAY]; /**< 1 or more file entries */
+};
 
 /**
  * Diff notification callback function.
@@ -287,8 +269,8 @@ typedef struct {
  *		continues.
  */
 typedef int (*git_diff_notify_cb)(
-	const git_diff_list *diff_so_far,
-	const git_diff_delta *delta_to_add,
+	const git_diff  *diff_so_far,
+	const git_delta *delta_to_add,
 	const char *matched_pathspec,
 	void *payload);
 
@@ -300,123 +282,24 @@ typedef int (*git_diff_notify_cb)(
  * give the defaults.  The default values are marked below.
  *
  * - `flags` is a combination of the `git_diff_option_t` values above
- * - `context_lines` is the number of unchanged lines that define the
- *    boundary of a hunk (and to display before and after)
- * - `interhunk_lines` is the maximum number of unchanged lines between
- *    hunk boundaries before the hunks will be merged into a one.
- * - `old_prefix` is the virtual "directory" to prefix to old file names
- *   in hunk headers (default "a")
- * - `new_prefix` is the virtual "directory" to prefix to new file names
- *   in hunk headers (default "b")
  * - `pathspec` is an array of paths / fnmatch patterns to constrain diff
- * - `max_size` is a file size (in bytes) above which a blob will be marked
- *   as binary automatically; pass a negative value to disable.
  * - `notify_cb` is an optional callback function, notifying the consumer of
  *   which files are being examined as the diff is generated
  * - `notify_payload` is the payload data to pass to the `notify_cb` function
  * - `ignore_submodules` overrides the submodule ignore setting for all
  *   submodules in the diff.
  */
-typedef struct {
+struct git_diff_options {
 	unsigned int version;      /**< version for the struct */
-	uint32_t flags;            /**< defaults to GIT_DIFF_NORMAL */
-	uint16_t context_lines;    /**< defaults to 3 */
-	uint16_t interhunk_lines;  /**< defaults to 0 */
-	const char *old_prefix;    /**< defaults to "a" */
-	const char *new_prefix;    /**< defaults to "b" */
+	uint32_t     flags;        /**< defaults to GIT_DIFF_NORMAL */
 	git_strarray pathspec;     /**< defaults to include all paths */
-	git_off_t max_size;        /**< defaults to 512MB */
 	git_diff_notify_cb notify_cb;
-	void *notify_payload;
+	void         *notify_payload;
 	git_submodule_ignore_t ignore_submodules; /** << submodule ignore rule */
-} git_diff_options;
+};
 
 #define GIT_DIFF_OPTIONS_VERSION 1
-#define GIT_DIFF_OPTIONS_INIT {GIT_DIFF_OPTIONS_VERSION, GIT_DIFF_NORMAL, 3}
-
-/**
- * When iterating over a diff, callback that will be made per file.
- *
- * @param delta A pointer to the delta data for the file
- * @param progress Goes from 0 to 1 over the diff list
- * @param payload User-specified pointer from foreach function
- */
-typedef int (*git_diff_file_cb)(
-	const git_diff_delta *delta,
-	float progress,
-	void *payload);
-
-/**
- * Structure describing a hunk of a diff.
- */
-typedef struct {
-	int old_start; /** Starting line number in old_file */
-	int old_lines; /** Number of lines in old_file */
-	int new_start; /** Starting line number in new_file */
-	int new_lines; /** Number of lines in new_file */
-} git_diff_range;
-
-/**
- * When iterating over a diff, callback that will be made per hunk.
- */
-typedef int (*git_diff_hunk_cb)(
-	const git_diff_delta *delta,
-	const git_diff_range *range,
-	const char *header,
-	size_t header_len,
-	void *payload);
-
-/**
- * Line origin constants.
- *
- * These values describe where a line came from and will be passed to
- * the git_diff_data_cb when iterating over a diff.  There are some
- * special origin constants at the end that are used for the text
- * output callbacks to demarcate lines that are actually part of
- * the file or hunk headers.
- */
-typedef enum {
-	/* These values will be sent to `git_diff_data_cb` along with the line */
-	GIT_DIFF_LINE_CONTEXT   = ' ',
-	GIT_DIFF_LINE_ADDITION  = '+',
-	GIT_DIFF_LINE_DELETION  = '-',
-
-	GIT_DIFF_LINE_CONTEXT_EOFNL = '=', /**< Both files have no LF at end */
-	GIT_DIFF_LINE_ADD_EOFNL = '>',     /**< Old has no LF at end, new does */
-	GIT_DIFF_LINE_DEL_EOFNL = '<',     /**< Old has LF at end, new does not */
-
-	/* The following values will only be sent to a `git_diff_data_cb` when
-	 * the content of a diff is being formatted (eg. through
-	 * git_diff_print_patch() or git_diff_print_compact(), for instance).
-	 */
-	GIT_DIFF_LINE_FILE_HDR  = 'F',
-	GIT_DIFF_LINE_HUNK_HDR  = 'H',
-	GIT_DIFF_LINE_BINARY    = 'B' /**< For "Binary files x and y differ" */
-} git_diff_line_t;
-
-/**
- * When iterating over a diff, callback that will be made per text diff
- * line. In this context, the provided range will be NULL.
- *
- * When printing a diff, callback that will be made to output each line
- * of text.  This uses some extra GIT_DIFF_LINE_... constants for output
- * of lines of file and hunk headers.
- */
-typedef int (*git_diff_data_cb)(
-	const git_diff_delta *delta, /** delta that contains this data */
-	const git_diff_range *range, /** range of lines containing this data */
-	char line_origin,            /** git_diff_list_t value from above */
-	const char *content,         /** diff data - not NUL terminated */
-	size_t content_len,          /** number of bytes of diff data */
-	void *payload);              /** user reference data */
-
-/**
- * The diff patch is used to store all the text diffs for a delta.
- *
- * You can easily loop over the content of patches and get information about
- * them.
- */
-typedef struct git_diff_patch git_diff_patch;
+#define GIT_DIFF_OPTIONS_INIT {GIT_DIFF_OPTIONS_VERSION, GIT_DIFF_NORMAL }
 
 /**
  * Flags to control the behavior of diff rename/copy detection.
@@ -464,10 +347,10 @@ typedef enum {
  */
 typedef struct {
 	int (*file_signature)(
-		void **out, const git_diff_file *file,
+		void **out, const git_delta_file *file,
 		const char *fullpath, void *payload);
 	int (*buffer_signature)(
-		void **out, const git_diff_file *file,
+		void **out, const git_delta_file *file,
 		const char *buf, size_t buflen, void *payload);
 	void (*free_signature)(void *sig, void *payload);
 	int (*similarity)(int *score, void *siga, void *sigb, void *payload);
@@ -524,7 +407,7 @@ typedef struct {
 /** @name Diff List Generator Functions
  *
  * These are the functions you would use to create (or destroy) a
- * git_diff_list from various objects in a repository.
+ * git_diff from various objects in a repository.
  */
 /**@{*/
 
@@ -533,7 +416,7 @@ typedef struct {
  *
  * @param diff The previously created diff list; cannot be used after free.
  */
-GIT_EXTERN(void) git_diff_list_free(git_diff_list *diff);
+GIT_EXTERN(void) git_diff_free(git_diff *diff);
 
 /**
  * Create a diff list with the difference between two tree objects.
@@ -545,14 +428,14 @@ GIT_EXTERN(void) git_diff_list_free(git_diff_list *diff);
  * pass NULL to indicate an empty tree, although it is an error to pass
  * NULL for both the `old_tree` and `new_tree`.
  *
- * @param diff Output pointer to a git_diff_list pointer to be allocated.
+ * @param diff Output pointer to a git_diff pointer to be allocated.
  * @param repo The repository containing the trees.
  * @param old_tree A git_tree object to diff from, or NULL for empty tree.
  * @param new_tree A git_tree object to diff to, or NULL for empty tree.
  * @param opts Structure with options to influence diff or NULL for defaults.
  */
 GIT_EXTERN(int) git_diff_tree_to_tree(
-	git_diff_list **diff,
+	git_diff **diff,
 	git_repository *repo,
 	git_tree *old_tree,
 	git_tree *new_tree,
@@ -567,14 +450,14 @@ GIT_EXTERN(int) git_diff_tree_to_tree(
  * The tree you pass will be used for the "old_file" side of the delta, and
  * the index will be used for the "new_file" side of the delta.
  *
- * @param diff Output pointer to a git_diff_list pointer to be allocated.
+ * @param diff Output pointer to a git_diff pointer to be allocated.
  * @param repo The repository containing the tree and index.
  * @param old_tree A git_tree object to diff from, or NULL for empty tree.
  * @param index The index to diff with; repo index used if NULL.
  * @param opts Structure with options to influence diff or NULL for defaults.
  */
 GIT_EXTERN(int) git_diff_tree_to_index(
-	git_diff_list **diff,
+	git_diff **diff,
 	git_repository *repo,
 	git_tree *old_tree,
 	git_index *index,
@@ -591,13 +474,13 @@ GIT_EXTERN(int) git_diff_tree_to_index(
  * The index will be used for the "old_file" side of the delta, and the
  * working directory will be used for the "new_file" side of the delta.
  *
- * @param diff Output pointer to a git_diff_list pointer to be allocated.
+ * @param diff Output pointer to a git_diff pointer to be allocated.
  * @param repo The repository.
  * @param index The index to diff from; repo index used if NULL.
  * @param opts Structure with options to influence diff or NULL for defaults.
  */
 GIT_EXTERN(int) git_diff_index_to_workdir(
-	git_diff_list **diff,
+	git_diff **diff,
 	git_repository *repo,
 	git_index *index,
 	const git_diff_options *opts); /**< can be NULL for defaults */
@@ -619,20 +502,20 @@ GIT_EXTERN(int) git_diff_index_to_workdir(
  *
  * To emulate `git diff <treeish>`, call both `git_diff_tree_to_index` and
  * `git_diff_index_to_workdir`, then call `git_diff_merge` on the results.
- * That will yield a `git_diff_list` that matches the git output.
+ * That will yield a `git_diff` that matches the git output.
  *
  * If this seems confusing, take the case of a file with a staged deletion
  * where the file has then been put back into the working dir and modified.
  * The tree-to-workdir diff for that file is 'modified', but core git would
  * show status 'deleted' since there is a pending deletion in the index.
  *
- * @param diff A pointer to a git_diff_list pointer that will be allocated.
+ * @param diff A pointer to a git_diff pointer that will be allocated.
  * @param repo The repository containing the tree.
  * @param old_tree A git_tree object to diff from, or NULL for empty tree.
  * @param opts Structure with options to influence diff or NULL for defaults.
  */
 GIT_EXTERN(int) git_diff_tree_to_workdir(
-	git_diff_list **diff,
+	git_diff **diff,
 	git_repository *repo,
 	git_tree *old_tree,
 	const git_diff_options *opts); /**< can be NULL for defaults */
@@ -651,8 +534,9 @@ GIT_EXTERN(int) git_diff_tree_to_workdir(
  * @param from Diff to merge.
  */
 GIT_EXTERN(int) git_diff_merge(
-	git_diff_list *onto,
-	const git_diff_list *from);
+	git_diff **out,
+	const git_diff *onto,
+	const git_diff *from);
 
 /**
  * Transform a diff list marking file renames, copies, etc.
@@ -667,7 +551,8 @@ GIT_EXTERN(int) git_diff_merge(
  * @return 0 on success, -1 on failure
  */
 GIT_EXTERN(int) git_diff_find_similar(
-	git_diff_list *diff,
+	git_diff **out,
+	const git_diff *diff,
 	git_diff_find_options *options);
 
 /**@}*/
@@ -681,68 +566,57 @@ GIT_EXTERN(int) git_diff_find_similar(
 /**@{*/
 
 /**
- * Loop over all deltas in a diff list issuing callbacks.
+ * Query how many diff records are there in a diff list.
  *
- * This will iterate through all of the files described in a diff.  You
- * should provide a file callback to learn about each file.
- *
- * The "hunk" and "line" callbacks are optional, and the text diff of the
- * files will only be calculated if they are not NULL.  Of course, these
- * callbacks will not be invoked for binary files on the diff list or for
- * files whose only changed is a file mode change.
- *
- * Returning a non-zero value from any of the callbacks will terminate
- * the iteration and cause this return `GIT_EUSER`.
- *
- * @param diff A git_diff_list generated by one of the above functions.
- * @param file_cb Callback function to make per file in the diff.
- * @param hunk_cb Optional callback to make per hunk of text diff.  This
- *                callback is called to describe a range of lines in the
- *                diff.  It will not be issued for binary files.
- * @param line_cb Optional callback to make per line of diff text.  This
- *                same callback will be made for context lines, added, and
- *                removed lines, and even for a deleted trailing newline.
- * @param payload Reference pointer that will be passed to your callbacks.
- * @return 0 on success, GIT_EUSER on non-zero callback, or error code
+ * @param diff A git_diff generated by one of the above functions
+ * @return Count of number of deltas in the list
  */
-GIT_EXTERN(int) git_diff_foreach(
-	git_diff_list *diff,
-	git_diff_file_cb file_cb,
-	git_diff_hunk_cb hunk_cb,
-	git_diff_data_cb line_cb,
-	void *payload);
+GIT_EXTERN(int) git_diff_num_deltas(git_diff *diff);
 
 /**
- * Iterate over a diff generating text output like "git diff --name-status".
+ * Query how many diff deltas are there in a diff list filtered by type.
  *
- * Returning a non-zero value from the callbacks will terminate the
- * iteration and cause this return `GIT_EUSER`.
+ * This works just like `git_diff_entrycount()` with an extra parameter
+ * that is a `git_delta_t` and returns just the count of how many deltas
+ * match that particular type.
  *
- * @param diff A git_diff_list generated by one of the above functions.
- * @param print_cb Callback to make per line of diff text.
- * @param payload Reference pointer that will be passed to your callback.
- * @return 0 on success, GIT_EUSER on non-zero callback, or error code
+ * @param diff A git_diff generated by one of the above functions
+ * @param type A git_delta_t value to filter the count
+ * @return Count of number of deltas matching delta_t type
  */
-GIT_EXTERN(int) git_diff_print_compact(
-	git_diff_list *diff,
-	git_diff_data_cb print_cb,
-	void *payload);
+GIT_EXTERN(int) git_diff_num_deltas_of_type(git_diff *diff, git_delta_t type);
 
 /**
- * Iterate over a diff generating text output like "git diff --raw".
+ * Check if deltas are sorted case sensitively or insensitively.
  *
- * Returning a non-zero value from the callbacks will terminate the
- * iteration and cause this return `GIT_EUSER`.
- *
- * @param diff A git_diff_list generated by one of the above functions.
- * @param print_cb Callback to make per line of diff text.
- * @param payload Reference pointer that will be passed to your callback.
- * @return 0 on success, GIT_EUSER on non-zero callback, or error code
+ * @param diff Diff list to check
+ * @return 0 if case sensitive, 1 if case is ignored
  */
-GIT_EXTERN(int) git_diff_print_raw(
-	git_diff_list *diff,
-	git_diff_data_cb print_cb,
-	void *payload);
+GIT_EXTERN(int) git_diff_is_sorted_icase(const git_diff *diff);
+
+/**
+ * Set sort order of diff deltas
+ *
+ * @param diff Diff to resort
+ * @param case_sensitive Should sort be case-sensitive or not?
+ * @return 0 on success, <0 on failure
+ */
+GIT_EXTERN(int) git_diff_sort(git_diff *diff, int case_sensitive);
+
+/**
+ * Return the diff delta for an entry in the diff list.
+ *
+ * The `git_delta` pointer points to internal data and you do not have
+ * to release it when you are done with it.  It will go away when the
+ * `git_diff` (or any associated `git_patch`) goes away.
+ *
+ * @param out Output parameter for the delta object
+ * @param diff Diff list object
+ * @param idx Index into diff list
+ * @return 0 on success, other value < 0 on error
+ */
+GIT_EXTERN(int) git_diff_get_delta(
+	const git_delta **out, git_diff *diff, int idx);
 
 /**
  * Look up the single character abbreviation for a delta status code.
@@ -758,374 +632,192 @@ GIT_EXTERN(int) git_diff_print_raw(
  */
 GIT_EXTERN(char) git_diff_status_char(git_delta_t status);
 
-/**
- * Iterate over a diff generating text output like "git diff".
- *
- * This is a super easy way to generate a patch from a diff.
- *
- * Returning a non-zero value from the callbacks will terminate the
- * iteration and cause this return `GIT_EUSER`.
- *
- * @param diff A git_diff_list generated by one of the above functions.
- * @param payload Reference pointer that will be passed to your callbacks.
- * @param print_cb Callback function to output lines of the diff.  This
- *                 same function will be called for file headers, hunk
- *                 headers, and diff lines.  Fortunately, you can probably
- *                 use various GIT_DIFF_LINE constants to determine what
- *                 text you are given.
- * @return 0 on success, GIT_EUSER on non-zero callback, or error code
- */
-GIT_EXTERN(int) git_diff_print_patch(
-	git_diff_list *diff,
-	git_diff_data_cb print_cb,
-	void *payload);
 
 /**
- * Query how many diff records are there in a diff list.
- *
- * @param diff A git_diff_list generated by one of the above functions
- * @return Count of number of deltas in the list
+ * Possible output formats for delta
  */
-GIT_EXTERN(size_t) git_diff_num_deltas(git_diff_list *diff);
+typedef enum {
+	/** Different supported diff delta output formats */
+	GIT_DIFF_FORMAT_DEFAULT      = 0u, /**< use default format for API */
+	GIT_DIFF_FORMAT_PATCH        = 1u, /**< full git diff */
+	GIT_DIFF_FORMAT_PATCH_HEADER = 2u, /**< just the file header of patch */
+	GIT_DIFF_FORMAT_RAW          = 3u, /**< like git diff --raw */
+	GIT_DIFF_FORMAT_NAME_ONLY    = 4u, /**< like --name-only */
+	GIT_DIFF_FORMAT_NAME_STATUS  = 5u, /**< like --name-status */
+} git_diff_format_t;
 
 /**
- * Query how many diff deltas are there in a diff list filtered by type.
- *
- * This works just like `git_diff_entrycount()` with an extra parameter
- * that is a `git_delta_t` and returns just the count of how many deltas
- * match that particular type.
- *
- * @param diff A git_diff_list generated by one of the above functions
- * @param type A git_delta_t value to filter the count
- * @return Count of number of deltas matching delta_t type
+ * Flags altering the way that diff text will be generated
  */
-GIT_EXTERN(size_t) git_diff_num_deltas_of_type(
-	git_diff_list *diff,
-	git_delta_t type);
+typedef enum {
+	/** Treat all files as text, disabling binary attributes & detection */
+	GIT_DIFF_FORMAT_FORCE_TEXT   = (1u << 0),
+	/** Treat all files as binary, disabling text diffs */
+	GIT_DIFF_FORMAT_FORCE_BINARY = (1u << 1),
+
+	/** Ignore all whitespace */
+	GIT_DIFF_FORMAT_IGNORE_WHITESPACE = (1u << 2),
+	/** Ignore changes in amount of whitespace */
+	GIT_DIFF_FORMAT_IGNORE_WHITESPACE_CHANGE = (1u << 3),
+	/** Ignore whitespace at end of line */
+	GIT_DIFF_FORMAT_IGNORE_WHITESPACE_EOL = (1u << 4),
+
+	/** Use the Patience Diff algorithm (currently unimplemented) */
+	GIT_DIFF_FORMAT_PATIENCE = (1u << 5),
+	/** Take longer to generate a minimal diff (currently unimplemented) */
+	GIT_DIFF_FORMAT_MINIMAL = (1u << 6),
+
+	/** Use mnemonic prefixes for paths */
+	GIT_DIFF_FORMAT_MNEMONIC_PREFIX = (1u << 7),
+} git_diff_format_option_t;
 
 /**
- * Check if deltas are sorted case sensitively or insensitively.
+ * Structure describing how delta output should be formatted
  *
- * @param diff Diff list to check
- * @return 0 if case sensitive, 1 if case is ignored
+ * - `flags` is a combination of the `git_diff_format_t` values above
+ * - `context_lines` is the number of unchanged lines that define the
+ *   boundary of a hunk (and to display before and after)
+ * - `interhunk_lines` is the maximum number of unchanged lines between
+ *   hunk boundaries before the hunks will be merged into a one.
+ * - `oid_abbrev` is the number of digits of OID to display.
+ * - `max_size` is a file size (in bytes) above which a blob will be marked
+ *   as binary automatically; pass a negative value to disable.
+ * - `old_prefix` is the virtual "directory" to prefix to old file names
+ *   in hunk headers (default "a")
+ * - `new_prefix` is the virtual "directory" to prefix to new file names
+ *   in hunk headers (default "b")
  */
-GIT_EXTERN(int) git_diff_is_sorted_icase(const git_diff_list *diff);
+struct git_diff_format_options {
+	unsigned int version;         /**< version for the struct */
+	git_diff_format_t format;     /**< format to generate */
+	uint16_t     context_lines;   /**< defaults to 3, 0 means 0 not default */
+	uint16_t     interhunk_lines; /**< defaults to 0 */
+	uint16_t     flags;           /**< git_diff_format_option_t values */
+	uint16_t     oid_abbrev;      /**< default 'core.abbrev' or 7 if unset */
+	git_off_t    max_size;        /**< defaults to 512MB */
+	const char  *old_prefix;      /**< default "a" */
+	const char  *new_prefix;      /**< default "b" */
+};
+
+#define GIT_DIFF_FORMAT_OPTIONS_VERSION 1
+#define GIT_DIFF_FORMAT_OPTIONS_INIT {GIT_DIFF_FORMAT_OPTIONS_VERSION,0,3}
 
 /**
- * Return the diff delta and patch for an entry in the diff list.
+ * Format diff output as string
  *
- * The `git_diff_patch` is a newly created object contains the text diffs
- * for the delta.  You have to call `git_diff_patch_free()` when you are
- * done with it.  You can use the patch object to loop over all the hunks
- * and lines in the diff of the one delta.
+ * This writes the diff into the output buffer in text form.  The
+ * delta_index indicates which delta to format; pass a negative value to
+ * format the whole diff.
  *
- * For an unchanged file or a binary file, no `git_diff_patch` will be
- * created, the output will be set to NULL, and the `binary` flag will be
- * set true in the `git_diff_delta` structure.
+ * Most of the diff format values just use the data from the delta to
+ * generate the output and are fairly inexpensive.  The one exception is
+ * the GIT_DIFF_FORMAT_PATCH style which actually loads the full files and
+ * generates the full patch behind the scenes.
  *
- * The `git_diff_delta` pointer points to internal data and you do not have
- * to release it when you are done with it.  It will go away when the
- * `git_diff_list` and `git_diff_patch` go away.
- *
- * It is okay to pass NULL for either of the output parameters; if you pass
- * NULL for the `git_diff_patch`, then the text diff will not be calculated.
- *
- * @param patch_out Output parameter for the delta patch object
- * @param delta_out Output parameter for the delta object
- * @param diff Diff list object
- * @param idx Index into diff list
- * @return 0 on success, other value < 0 on error
- */
-GIT_EXTERN(int) git_diff_get_patch(
-	git_diff_patch **patch_out,
-	const git_diff_delta **delta_out,
-	git_diff_list *diff,
-	size_t idx);
-
-/**
- * Free a git_diff_patch object.
- */
-GIT_EXTERN(void) git_diff_patch_free(
-	git_diff_patch *patch);
-
-/**
- * Get the delta associated with a patch
- */
-GIT_EXTERN(const git_diff_delta *) git_diff_patch_delta(
-	git_diff_patch *patch);
-
-/**
- * Get the number of hunks in a patch
- */
-GIT_EXTERN(size_t) git_diff_patch_num_hunks(
-	git_diff_patch *patch);
-
-/**
- * Get line counts of each type in a patch.
- *
- * This helps imitate a diff --numstat type of output.  For that purpose,
- * you only need the `total_additions` and `total_deletions` values, but we
- * include the `total_context` line count in case you want the total number
- * of lines of diff output that will be generated.
- *
- * All outputs are optional. Pass NULL if you don't need a particular count.
- *
- * @param total_context Count of context lines in output, can be NULL.
- * @param total_additions Count of addition lines in output, can be NULL.
- * @param total_deletions Count of deletion lines in output, can be NULL.
- * @param patch The git_diff_patch object
- * @return 0 on success, <0 on error
- */
-GIT_EXTERN(int) git_diff_patch_line_stats(
-	size_t *total_context,
-	size_t *total_additions,
-	size_t *total_deletions,
-	const git_diff_patch *patch);
-
-/**
- * Get the information about a hunk in a patch
- *
- * Given a patch and a hunk index into the patch, this returns detailed
- * information about that hunk.  Any of the output pointers can be passed
- * as NULL if you don't care about that particular piece of information.
- *
- * @param range Output pointer to git_diff_range of hunk
- * @param header Output pointer to header string for hunk.  Unlike the
- *               content pointer for each line, this will be NUL-terminated
- * @param header_len Output value of characters in header string
- * @param lines_in_hunk Output count of total lines in this hunk
- * @param patch Input pointer to patch object
- * @param hunk_idx Input index of hunk to get information about
- * @return 0 on success, GIT_ENOTFOUND if hunk_idx out of range, <0 on error
- */
-GIT_EXTERN(int) git_diff_patch_get_hunk(
-	const git_diff_range **range,
-	const char **header,
-	size_t *header_len,
-	size_t *lines_in_hunk,
-	git_diff_patch *patch,
-	size_t hunk_idx);
-
-/**
- * Get the number of lines in a hunk.
- *
- * @param patch The git_diff_patch object
- * @param hunk_idx Index of the hunk
- * @return Number of lines in hunk or -1 if invalid hunk index
- */
-GIT_EXTERN(int) git_diff_patch_num_lines_in_hunk(
-	git_diff_patch *patch,
-	size_t hunk_idx);
-
-/**
- * Get data about a line in a hunk of a patch.
- *
- * Given a patch, a hunk index, and a line index in the hunk, this
- * will return a lot of details about that line.  If you pass a hunk
- * index larger than the number of hunks or a line index larger than
- * the number of lines in the hunk, this will return -1.
- *
- * @param line_origin A GIT_DIFF_LINE constant from above
- * @param content Pointer to content of diff line, not NUL-terminated
- * @param content_len Number of characters in content
- * @param old_lineno Line number in old file or -1 if line is added
- * @param new_lineno Line number in new file or -1 if line is deleted
- * @param patch The patch to look in
- * @param hunk_idx The index of the hunk
- * @param line_of_hunk The index of the line in the hunk
- * @return 0 on success, <0 on failure
- */
-GIT_EXTERN(int) git_diff_patch_get_line_in_hunk(
-	char *line_origin,
-	const char **content,
-	size_t *content_len,
-	int *old_lineno,
-	int *new_lineno,
-	git_diff_patch *patch,
-	size_t hunk_idx,
-	size_t line_of_hunk);
-
-/**
- * Look up size of patch diff data in bytes
- *
- * This returns the raw size of the patch data.  This only includes the
- * actual data from the lines of the diff, not the file or hunk headers.
- *
- * If you pass `include_context` as true (non-zero), this will be the size
- * of all of the diff output; if you pass it as false (zero), this will
- * only include the actual changed lines (as if `context_lines` was 0).
- *
- * @param patch A git_diff_patch representing changes to one file
- * @param include_context Include context lines in size if non-zero
- * @param include_hunk_headers Include hunk header lines if non-zero
- * @param include_file_headers Include file header lines if non-zero
- * @return The number of bytes of data
- */
-GIT_EXTERN(size_t) git_diff_patch_size(
-	git_diff_patch *patch,
-	int include_context,
-	int include_hunk_headers,
-	int include_file_headers);
-
-/**
- * Serialize the patch to text via callback.
- *
- * Returning a non-zero value from the callback will terminate the iteration
- * and cause this return `GIT_EUSER`.
- *
- * @param patch A git_diff_patch representing changes to one file
- * @param print_cb Callback function to output lines of the patch.  Will be
- *                 called for file headers, hunk headers, and diff lines.
- * @param payload Reference pointer that will be passed to your callbacks.
- * @return 0 on success, GIT_EUSER on non-zero callback, or error code
- */
-GIT_EXTERN(int) git_diff_patch_print(
-	git_diff_patch *patch,
-	git_diff_data_cb print_cb,
-	void *payload);
-
-/**
- * Get the content of a patch as a single diff text.
- *
- * @param string Allocated string; caller must free.
- * @param patch A git_diff_patch representing changes to one file
+ * @param output Buffer to write output into
+ * @param diff The diff to read delta from
+ * @param delta_index The index of delta to format or negative for all
+ * @param format_opts Formatting options to control output
  * @return 0 on success, <0 on failure.
  */
-GIT_EXTERN(int) git_diff_patch_to_str(
-	char **string,
-	git_diff_patch *patch);
-
-/**@}*/
-
+GIT_EXTERN(int) git_diff_format_to_str(
+	git_buf *output,
+	const git_diff *diff,
+	int delta_index,
+	const git_diff_format_options *format_opts);
 
 /*
- * Misc
+ * Callback-based APIs
+ *
+ * It can be more awkward but use less memory to not permanently create
+ * the git_patch object and to just apply callbacks to a git_diff and a
+ * delta index.  These functions work with the patch data structures, just
+ * all the allocations are temporary instead of permanent.
  */
 
 /**
- * Directly run a diff on two blobs.
- *
- * Compared to a file, a blob lacks some contextual information. As such,
- * the `git_diff_file` given to the callback will have some fake data; i.e.
- * `mode` will be 0 and `path` will be NULL.
- *
- * NULL is allowed for either `old_blob` or `new_blob` and will be treated
- * as an empty blob, with the `oid` set to NULL in the `git_diff_file` data.
- * Passing NULL for both blobs is a noop; no callbacks will be made at all.
- *
- * We do run a binary content check on the blob content and if either blob
- * looks like binary data, the `git_diff_delta` binary attribute will be set
- * to 1 and no call to the hunk_cb nor line_cb will be made (unless you pass
- * `GIT_DIFF_FORCE_TEXT` of course).
- *
- * @param old_blob Blob for old side of diff, or NULL for empty blob
- * @param old_as_path Treat old blob as if it had this filename; can be NULL
- * @param new_blob Blob for new side of diff, or NULL for empty blob
- * @param new_as_path Treat new blob as if it had this filename; can be NULL
- * @param options Options for diff, or NULL for default options
- * @param file_cb Callback for "file"; made once if there is a diff; can be NULL
- * @param hunk_cb Callback for each hunk in diff; can be NULL
- * @param line_cb Callback for each line in diff; can be NULL
- * @param payload Payload passed to each callback function
- * @return 0 on success, GIT_EUSER on non-zero callback return, or error code
+ * Callback made with patch file header
  */
-GIT_EXTERN(int) git_diff_blobs(
-	const git_blob *old_blob,
-	const char *old_as_path,
-	const git_blob *new_blob,
-	const char *new_as_path,
-	const git_diff_options *options,
-	git_diff_file_cb file_cb,
-	git_diff_hunk_cb hunk_cb,
-	git_diff_data_cb line_cb,
+typedef int (*git_diff_file_cb)(
+	const git_delta *delta, /** delta for the patch */
+	const char      *header,
+	size_t           header_len,
 	void *payload);
 
 /**
- * Directly generate a patch from the difference between two blobs.
- *
- * This is just like `git_diff_blobs()` except it generates a patch object
- * for the difference instead of directly making callbacks.  You can use the
- * standard `git_diff_patch` accessor functions to read the patch data, and
- * you must call `git_diff_patch_free()` on the patch when done.
- *
- * @param out The generated patch; NULL on error
- * @param old_blob Blob for old side of diff, or NULL for empty blob
- * @param old_as_path Treat old blob as if it had this filename; can be NULL
- * @param new_blob Blob for new side of diff, or NULL for empty blob
- * @param new_as_path Treat new blob as if it had this filename; can be NULL
- * @param opts Options for diff, or NULL for default options
- * @return 0 on success or error code < 0
+ * Callback made for each hunk in patch text
  */
-GIT_EXTERN(int) git_diff_patch_from_blobs(
-	git_diff_patch **out,
+typedef int (*git_diff_hunk_cb)(
+	const git_delta      *delta, /** delta for the patch */
+	const git_patch_hunk *hunk,  /** hunk of patch */
+	void *payload);
+
+/**
+ * When iterating over a diff, callback that will be made per text diff
+ * line. In this context, the provided range will be NULL.
+ *
+ * When printing a diff, callback that will be made to output each line
+ * of text.  This uses some extra GIT_PATCH_LINE_... constants for output
+ * of lines of file and hunk headers.
+ */
+typedef int (*git_diff_line_cb)(
+	const git_delta      *delta, /** delta for the patch */
+	const git_patch_hunk *hunk,  /** hunk of patch */
+	const git_patch_line *line,  /** line of hunk */
+	void *payload);
+
+/**
+ * Process diff into patches with callbacks
+ *
+ * @param diff The diff to read delta from
+ * @param delta_index The index of delta to format or negative for all
+ * @param opts Formatting options to control output
+ */
+GIT_EXTERN(int) git_diff_format(
+	const git_diff *diff,
+	int delta_index,
+	const git_diff_format_options *format_opts,
+	git_diff_file_cb file_cb,
+	git_diff_hunk_cb hunk_cb,
+	git_diff_line_cb line_cb,
+	void *payload);
+
+/**
+ * Process change in blobs as patch with callbacks
+ *
+ * This runs callback functions over all the hunks and lines in the patch
+ * form of a delta.
+ */
+GIT_EXTERN(int) git_diff_format_blobs(
 	const git_blob *old_blob,
 	const char *old_as_path,
 	const git_blob *new_blob,
 	const char *new_as_path,
-	const git_diff_options *opts);
+	const git_diff_options *diff_opts,
+	const git_diff_format_options *format_opts,
+	git_diff_file_cb file_cb,
+	git_diff_hunk_cb hunk_cb,
+	git_diff_line_cb line_cb,
+	void *payload);
 
 /**
- * Directly run a diff between a blob and a buffer.
+ * Process change in blobs as patch with callbacks
  *
- * As with `git_diff_blobs`, comparing a blob and buffer lacks some context,
- * so the `git_diff_file` parameters to the callbacks will be faked a la the
- * rules for `git_diff_blobs()`.
- *
- * Passing NULL for `old_blob` will be treated as an empty blob (i.e. the
- * `file_cb` will be invoked with GIT_DELTA_ADDED and the diff will be the
- * entire content of the buffer added).  Passing NULL to the buffer will do
- * the reverse, with GIT_DELTA_REMOVED and blob content removed.
- *
- * @param old_blob Blob for old side of diff, or NULL for empty blob
- * @param old_as_path Treat old blob as if it had this filename; can be NULL
- * @param buffer Raw data for new side of diff, or NULL for empty
- * @param buffer_len Length of raw data for new side of diff
- * @param buffer_as_path Treat buffer as if it had this filename; can be NULL
- * @param options Options for diff, or NULL for default options
- * @param file_cb Callback for "file"; made once if there is a diff; can be NULL
- * @param hunk_cb Callback for each hunk in diff; can be NULL
- * @param data_cb Callback for each line in diff; can be NULL
- * @param payload Payload passed to each callback function
- * @return 0 on success, GIT_EUSER on non-zero callback return, or error code
+ * This runs callback functions over all the hunks and lines in the patch
+ * form of a delta.
  */
-GIT_EXTERN(int) git_diff_blob_to_buffer(
+GIT_EXTERN(int) git_diff_format_blob_and_buffer(
 	const git_blob *old_blob,
 	const char *old_as_path,
 	const char *buffer,
 	size_t buffer_len,
 	const char *buffer_as_path,
-	const git_diff_options *options,
+	const git_diff_options *diff_opts,
+	const git_diff_format_options *format_opts,
 	git_diff_file_cb file_cb,
 	git_diff_hunk_cb hunk_cb,
-	git_diff_data_cb data_cb,
+	git_diff_line_cb line_cb,
 	void *payload);
-
-/**
- * Directly generate a patch from the difference between a blob and a buffer.
- *
- * This is just like `git_diff_blob_to_buffer()` except it generates a patch
- * object for the difference instead of directly making callbacks.  You can
- * use the standard `git_diff_patch` accessor functions to read the patch
- * data, and you must call `git_diff_patch_free()` on the patch when done.
- *
- * @param out The generated patch; NULL on error
- * @param old_blob Blob for old side of diff, or NULL for empty blob
- * @param old_as_path Treat old blob as if it had this filename; can be NULL
- * @param buffer Raw data for new side of diff, or NULL for empty
- * @param buffer_len Length of raw data for new side of diff
- * @param buffer_as_path Treat buffer as if it had this filename; can be NULL
- * @param opts Options for diff, or NULL for default options
- * @return 0 on success or error code < 0
- */
-GIT_EXTERN(int) git_diff_patch_from_blob_and_buffer(
-	git_diff_patch **out,
-	const git_blob *old_blob,
-	const char *old_as_path,
-	const char *buffer,
-	size_t buffer_len,
-	const char *buffer_as_path,
-	const git_diff_options *opts);
-
 
 GIT_END_DECL
 
