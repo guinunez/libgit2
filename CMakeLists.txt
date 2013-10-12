@@ -11,6 +11,8 @@
 # Install:
 # > cmake --build . --target install
 
+lala
+
 PROJECT(libgit2 C)
 CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
 
